@@ -120,15 +120,16 @@ def zoho_upsert(df: pd.DataFrame, access_token: str):
         "autoIdentify":    "true",
         "matchingColumns": "Employee ID,Date",
     }
-    config_str = json.dumps(config, separators=(",", ":"))  # compact JSON, no spaces
+    config_str = json.dumps(config, separators=(",", ":"))
 
-    # CONFIG as form data field, FILE as multipart — both in same multipart request
-    files = {
-        "FILE":   ("data.csv", csv_data, "text/csv"),
-        "CONFIG": (None, config_str),
-    }
+    # Pass CONFIG as query param in URL, FILE as multipart body
+    # Use requests params= so it handles encoding correctly
+    params = {"CONFIG": config_str}
+    files  = {"FILE": ("data.csv", csv_data, "text/csv")}
 
-    r = requests.post(base_url, headers=headers, files=files, timeout=120)
+    print(f"\n  🔍 CONFIG being sent: {config_str}")
+
+    r = requests.post(base_url, headers=headers, params=params, files=files, timeout=120)
 
     print(f"\n  HTTP Status : {r.status_code}")
     print(f"  Response    : {r.text[:2000]}")
