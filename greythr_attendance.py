@@ -117,17 +117,22 @@ def zoho_upsert(df: pd.DataFrame, access_token: str):
     config = {
         "importType":      "updateadd",
         "fileType":        "csv",
-        "autoIdentify":    True,                        # boolean not string
-        "matchingColumns": ["Employee ID", "Date"],     # JSON array not string
+        "autoIdentify":    "true",                      # string not boolean
+        "dateFormat":      "yyyy-MM-dd",                # our date format
+        "matchingColumns": ["Employee ID", "Date"],     # JSON array
     }
-    config_str = json.dumps(config, separators=(",", ":"))
-
-    params = {"CONFIG": config_str}
-    files  = {"FILE": ("data.csv", csv_data, "text/csv")}
+    config_str = json.dumps(config)
 
     print(f"\n  🔍 CONFIG being sent: {config_str}")
 
-    r = requests.post(base_url, headers=headers, params=params, files=files, timeout=120)
+    # CONFIG as form field (data=), FILE as multipart — same request
+    r = requests.post(
+        base_url,
+        headers=headers,
+        data={"CONFIG": config_str},
+        files={"FILE": ("data.csv", csv_data, "text/csv")},
+        timeout=120,
+    )
 
     print(f"\n  HTTP Status : {r.status_code}")
     print(f"  Response    : {r.text[:2000]}")
