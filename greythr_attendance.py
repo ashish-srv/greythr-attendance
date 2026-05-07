@@ -86,78 +86,73 @@ def zoho_row_count(access_token: str) -> int:
 
 
 def zoho_upsert(df: pd.DataFrame, access_token: str):
-    """
-    Push DataFrame to Zoho Analytics with robust error handling.
-    """
-    url = (f"https://analyticsapi.zoho.in/restapi/v2/bulk/workspaces/"
-           f"{ZOHO_WORKSPACE_ID}/views/{ZOHO_TABLE_ID}/data")
-
+    url = (
+        f"https://analyticsapi.zoho.in/restapi/v2/bulk/workspaces/"
+        f"{ZOHO_WORKSPACE_ID}/views/{ZOHO_TABLE_ID}/data"
+    )
     headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
-    
-    # DEBUG: Check first few rows
-    print("\n  🔍 DEBUG - First 3 rows being sent:")
-    print(df.head(3).to_string())
-    
-    # Try with smaller batch first
-    batch_size = 100  # Reduced from 1000 to debug
+
+    # Strip any accidental whitespace from column names
+    df.columns = [c.strip() for c in df.columns]
+
+    # Verify matching columns exist
+    matching_cols = ["Employee ID", "Date"]
+    for col in matching_cols:
+        if col not in df.columns:
+            print(f"❌ Column '{col}' not found in DataFrame. Columns: {list(df.columns)}")
+            return
+
+    print(f"\n  🔍 DataFrame columns: {list(df.columns)}")
+    print(f"  🔍 First row sample:\n{df.head(1).to_string()}")
+
+    batch_size = 500
     total = len(df)
-    
-    # Try just 1 row first for testing
-    debug_df = df.head(1)
-    csv_data = debug_df.to_csv(index=False)
-    print(f"\n  🔍 DEBUG - CSV preview:\n{csv_data[:500]}")
-    
-    # Test with just 1 row
-    files = {"DATA": ("data.csv", csv_data, "text/csv")}
-    data = {
-        "CONFIG": json.dumps({
-            "operation": "UPDATEADD",
-            "matchingColumns": ["Employee ID", "Date"],
-            "dateFormat": "yyyy-MM-dd",  # Changed from YYYY-MM-DD
-            "autoIdentify": "true",      # Add this
-        })
-    }
-    
-    print("\n  🔍 Test sending 1 row...")
-    r = requests.post(url, headers=headers, files=files, data=data, timeout=60)
-    print(f"  Response status: {r.status_code}")
-    print(f"  Response body: {r.text[:500]}")
-    
-    if r.status_code != 200:
-        print("  ❌ Test failed. Check column names and data types.")
-        return
-    
-    print("  ✅ Test successful! Now sending full data...")
-    
-    # If test passed, proceed with actual batches
     batches = (total + batch_size - 1) // batch_size
+
+    config = json.dumps({
+        "operation": "UPDATEADD",
+        "matchingColumns": matching_cols,
+        "dateFormat": "yyyy-MM-dd",
+        # Do NOT set autoIdentify here — it conflicts with explicit dateFormat
+    })
+
     for i in range(batches):
-        batch = df.iloc[i * batch_size : (i + 1) * batch_size]
-        csv_data = batch.to_csv(index=False)
-        
-        files = {"DATA": ("data.csv", csv_data, "text/csv")}
-        data = {
-            "CONFIG": json.dumps({
-                "operation": "UPDATEADD",
-                "matchingColumns": ["Employee ID", "Date"],
-                "dateFormat": "yyyy-MM-dd",
-            })
+        batch = df.iloc[i * batch_size: (i + 1) * batch_size]
+        csv_bytes = batch.to_csv(index=False).encode("utf-8")
+
+        # CONFIG goes in data (form field), DATA goes in files (multipart)
+        files = {
+            "DATA": ("data.csv", csv_bytes, "text/csv"),
         }
-        
+        form_data = {
+            "CONFIG": config,
+        }
+
         for attempt in range(3):
-            r = requests.post(url, headers=headers, files=files, data=data, timeout=60)
+            r = requests.post(
+                url,
+                headers=headers,
+                files=files,
+                data=form_data,
+                timeout=120,
+            )
+            resp_text = r.text[:500]
             if r.status_code == 200:
-                resp = r.json()
-                print(f"    ✅ Batch {i+1}/{batches} succeeded")
+                try:
+                    resp = r.json()
+                    imported = resp.get("data", {}).get("importSummary", {}).get("importedRowsCount", "?")
+                    print(f"    ✅ Batch {i+1}/{batches} — {imported} rows imported")
+                except Exception:
+                    print(f"    ✅ Batch {i+1}/{batches} succeeded (raw: {resp_text})")
                 break
             else:
-                print(f"    ❌ Batch {i+1} failed (attempt {attempt+1}): {r.status_code}")
-                print(f"       Response: {r.text[:200]}")
+                print(f"    ❌ Batch {i+1} attempt {attempt+1}: HTTP {r.status_code}")
+                print(f"       {resp_text}")
                 if attempt == 2:
-                    print(f"       Batch data preview: {csv_data[:200]}")
-                time.sleep(5)
-        
-        time.sleep(1)
+                    print(f"       Giving up on this batch.")
+                time.sleep(5 * (attempt + 1))
+
+        time.sleep(1.5)  # Be gentle with rate limits
 
 # ── GREYTHR HELPERS ───────────────────────────────────────────────────────────
 
