@@ -388,27 +388,21 @@ def build_final(df_att: pd.DataFrame, df_emp: pd.DataFrame) -> pd.DataFrame:
     df["Date"] = pd.to_datetime(df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
     df["In Time"] = df["firstInTime"].apply(extract_time)
     df["Out Time"] = df["lastOutTime"].apply(extract_time)
+    
+    # FIX: Replace empty time values with "00:00:00"
+    df["In Time"] = df["In Time"].apply(lambda x: "00:00:00" if not x or str(x).strip() == "" else x)
+    df["Out Time"] = df["Out Time"].apply(lambda x: "00:00:00" if not x or str(x).strip() == "" else x)
+    
     df["Work Minutes"] = df["totalWorkHrs"].apply(hhmmss_to_minutes)
     df["Actual Minutes (floor)"] = df["productionHours"].apply(hhmmss_to_minutes)
     df["Shortfall(min)"] = df["shortFallHrs"].apply(hhmmss_to_minutes)
     df["Break Minutes"] = df["breakHours"].apply(hhmmss_to_minutes)
-
-    # FIX: Replace empty time strings with NULL/None for Zoho
-    df["In Time"] = df["In Time"].replace("", None)
-    df["Out Time"] = df["Out Time"].replace("", None)
-    
-    # Also replace any whitespace-only strings
-    df["In Time"] = df["In Time"].apply(lambda x: None if pd.isna(x) or str(x).strip() == "" else x)
-    df["Out Time"] = df["Out Time"].apply(lambda x: None if pd.isna(x) or str(x).strip() == "" else x)
 
     # Status
     df["Status"] = df.apply(
         lambda r: build_status(r.get("session1Label"), r.get("session2Label")),
         axis=1
     )
-    
-    # Clean Status
-    df["Status"] = df["Status"].replace("", "Present")  # Default status if empty
     
     # Join employees
     wanted = ["employeeId", "name", "employeeNo", "leftorg"]
@@ -479,12 +473,6 @@ def build_final(df_att: pd.DataFrame, df_emp: pd.DataFrame) -> pd.DataFrame:
             df_final[col] = df_final[col].replace("nan", "")
             df_final[col] = df_final[col].replace("None", "")
     
-    # Clean boolean for leftorg
-    if "leftorg" in df_final.columns:
-        df_final["leftorg"] = df_final["leftorg"].astype(str).str.upper()
-        df_final["leftorg"] = df_final["leftorg"].replace("FALSE", "False")
-        df_final["leftorg"] = df_final["leftorg"].replace("TRUE", "True")
-    
     # Remove any rows with empty Employee ID
     df_final = df_final[df_final["Employee ID"] != ""]
     df_final = df_final[df_final["Employee ID"] != "nan"]
@@ -492,12 +480,12 @@ def build_final(df_att: pd.DataFrame, df_emp: pd.DataFrame) -> pd.DataFrame:
     df_final.sort_values(["Employee ID", "Date"], inplace=True)
     df_final.reset_index(drop=True, inplace=True)
 
-    # Preview the cleaned data
-    print(f"\n  📊 Final cleaned data shape: {df_final.shape}")
-    print(f"  📊 Sample row after cleaning:")
-    sample_row = df_final.iloc[0].to_dict() if len(df_final) > 0 else {}
-    for k, v in sample_row.items():
-        print(f"      {k}: {v} (type: {type(v).__name__})")
+    # Preview the cleaned data (verify 00:00:00 is populated)
+    print(f"\n  📊 Sample after time fix:")
+    if len(df_final) > 0:
+        sample = df_final.iloc[0]
+        print(f"      In Time: '{sample['In Time']}'")
+        print(f"      Out Time: '{sample['Out Time']}'")
 
     return df_final
 
