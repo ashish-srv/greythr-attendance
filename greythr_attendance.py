@@ -4,6 +4,7 @@ greytHR Attendance Fetcher → Zoho Analytics
 - First run (Zoho table empty): fetches from 2025-01-01 → yesterday
 - Subsequent runs: fetches last 2 months → upsert into Zoho
 - Zoho OAuth token is refreshed at the start of every run
+- Uses Zoho Analytics v1 Import API (UPDATEADD) with CSV multipart upload
 - Runs via GitHub Actions every 2 hours
 
 Usage:
@@ -16,6 +17,7 @@ import json
 import time
 import os
 import sys
+import urllib.parse
 from datetime import datetime, date, timedelta
 from dateutil.relativedelta import relativedelta
 
@@ -26,9 +28,13 @@ DOMAIN         = "srv-media.greythr.com"
 ZOHO_REFRESH_TOKEN  = os.environ.get("ZOHO_REFRESH_TOKEN")
 ZOHO_CLIENT_ID      = os.environ.get("ZOHO_CLIENT_ID")
 ZOHO_CLIENT_SECRET  = os.environ.get("ZOHO_CLIENT_SECRET")
-ZOHO_WORKSPACE_ID   = "445405000000352027"
-ZOHO_TABLE_ID       = "445405000014385591"
-ZOHO_ORG_ID         = os.environ.get("ZOHO_ORG_ID", "")  # optional, if required by your Zoho plan
+
+ZOHO_EMAIL          = "ashish.kate@srvmedia.com"
+ZOHO_WORKSPACE      = "Account Dashboard"
+ZOHO_TABLE          = "greytHR Attendance"
+
+# v1 API base — India data center
+ZOHO_API_BASE = "https://analyticsapi.zoho.in/api"
 
 HISTORY_START = date(2025, 1, 1)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -63,96 +69,120 @@ def get_zoho_access_token() -> str:
 
 # ── ZOHO DATA ─────────────────────────────────────────────────────────────────
 
+def zoho_table_url() -> str:
+    """Build the v1 API URL for the target table."""
+    email     = urllib.parse.quote(ZOHO_EMAIL, safe="")
+    workspace = urllib.parse.quote(ZOHO_WORKSPACE, safe="")
+    table     = urllib.parse.quote(ZOHO_TABLE, safe="")
+    return f"{ZOHO_API_BASE}/{email}/{workspace}/{table}"
+
+
 def zoho_row_count(access_token: str) -> int:
-    """Return number of rows currently in the Zoho table. 0 = first run."""
-    url = (f"https://analyticsapi.zoho.in/restapi/v2/bulk/workspaces/"
-           f"{ZOHO_WORKSPACE_ID}/views/{ZOHO_TABLE_ID}/data")
+    """
+    Return number of rows currently in the Zoho table.
+    Uses v1 EXPORT action with pageSize=1 to get totalCount.
+    Returns 0 on any failure (treated as first run).
+    """
+    url = zoho_table_url()
+    params = {
+        "ZOHO_ACTION":        "EXPORT",
+        "ZOHO_OUTPUT_FORMAT": "JSON",
+        "ZOHO_ERROR_FORMAT":  "JSON",
+        "ZOHO_API_VERSION":   "1.0",
+        "ZOHO_RECORD_COUNT":  "1",         # fetch only 1 row to check existence
+    }
     headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
-    params  = {"pageSize": 1}
     try:
-        r = requests.get(url, headers=headers, params=params, timeout=30)
+        r = requests.post(url, headers=headers, params=params, timeout=30)
         if r.status_code == 200:
             data = r.json()
-            # Zoho returns totalCount or similar in the response
-            count = (
-                data.get("data", {}).get("totalCount")
-                or data.get("totalCount")
-                or 0
+            # v1 response: {"response": {"result": {"totalCount": "N", ...}}}
+            total = (
+                data.get("response", {})
+                    .get("result", {})
+                    .get("totalCount", "0")
             )
-            return int(count)
+            return int(total)
+        else:
+            print(f"  ⚠️  Row count check returned {r.status_code}: {r.text[:200]}")
     except Exception as e:
-        print(f"  ⚠️  Could not check row count: {e}. Assuming first run.")
+        print(f"  ⚠️  Could not check row count: {e}")
     return 0
 
 
 def zoho_upsert(df: pd.DataFrame, access_token: str):
-    url = (
-        f"https://analyticsapi.zoho.in/restapi/v2/bulk/workspaces/"
-        f"{ZOHO_WORKSPACE_ID}/views/{ZOHO_TABLE_ID}/data"
-    )
+    """
+    Push DataFrame to Zoho Analytics using v1 Import API.
+    ZOHO_IMPORT_TYPE=UPDATEADD → insert new rows, update existing
+    matched on Employee ID + Date (set as unique columns in Zoho table).
+    Sends in batches of 500 rows.
+    """
+    url     = zoho_table_url()
     headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
 
-    # Strip any accidental whitespace from column names
-    df.columns = [c.strip() for c in df.columns]
-
-    # Verify matching columns exist
-    matching_cols = ["Employee ID", "Date"]
-    for col in matching_cols:
-        if col not in df.columns:
-            print(f"❌ Column '{col}' not found in DataFrame. Columns: {list(df.columns)}")
-            return
-
-    print(f"\n  🔍 DataFrame columns: {list(df.columns)}")
-    print(f"  🔍 First row sample:\n{df.head(1).to_string()}")
-
     batch_size = 500
-    total = len(df)
-    batches = (total + batch_size - 1) // batch_size
+    total      = len(df)
+    batches    = (total + batch_size - 1) // batch_size
 
-    config = json.dumps({
-        "operation": "UPDATEADD",
-        "matchingColumns": matching_cols,
-        "dateFormat": "yyyy-MM-dd",
-        # Do NOT set autoIdentify here — it conflicts with explicit dateFormat
-    })
+    print(f"\n  📤 Pushing {total:,} rows to Zoho in {batches} batch(es) …")
 
     for i in range(batches):
-        batch = df.iloc[i * batch_size: (i + 1) * batch_size]
-        csv_bytes = batch.to_csv(index=False).encode("utf-8")
+        batch    = df.iloc[i * batch_size : (i + 1) * batch_size]
+        csv_data = batch.to_csv(index=False).encode("utf-8")
 
-        # CONFIG goes in data (form field), DATA goes in files (multipart)
-        files = {
-            "DATA": ("data.csv", csv_bytes, "text/csv"),
+        # v1 API params go as query string, file goes as multipart
+        params = {
+            "ZOHO_ACTION":        "IMPORT",
+            "ZOHO_OUTPUT_FORMAT": "JSON",
+            "ZOHO_ERROR_FORMAT":  "JSON",
+            "ZOHO_API_VERSION":   "1.0",
+            "ZOHO_IMPORT_TYPE":   "UPDATEADD",   # upsert
+            "ZOHO_AUTO_IDENTIFY": "TRUE",         # auto-detect column types
+            "ZOHO_ON_IMPORT_ERROR": "ABORT",
+            "ZOHO_MATCHING_COLUMNS": "Employee ID,Date",  # unique key for upsert
         }
-        form_data = {
-            "CONFIG": config,
+
+        files = {
+            "ZOHO_FILE": ("data.csv", csv_data, "text/csv"),
         }
 
         for attempt in range(3):
             r = requests.post(
                 url,
                 headers=headers,
+                params=params,
                 files=files,
-                data=form_data,
                 timeout=120,
             )
-            resp_text = r.text[:500]
+            resp_text = r.text[:1000]
+
             if r.status_code == 200:
                 try:
-                    resp = r.json()
-                    imported = resp.get("data", {}).get("importSummary", {}).get("importedRowsCount", "?")
-                    print(f"    ✅ Batch {i+1}/{batches} — {imported} rows imported")
+                    resp       = r.json()
+                    result     = resp.get("response", {}).get("result", {})
+                    imported   = result.get("importSummary", {}).get("addedRows", "?")
+                    updated    = result.get("importSummary", {}).get("updatedRows", "?")
+                    skipped    = result.get("importSummary", {}).get("skippedRows", "?")
+                    print(f"    ✅ Batch {i+1}/{batches} — "
+                          f"added: {imported}, updated: {updated}, skipped: {skipped}")
                 except Exception:
                     print(f"    ✅ Batch {i+1}/{batches} succeeded (raw: {resp_text})")
                 break
+
+            elif r.status_code == 429:
+                print(f"    ⚠️  Rate limited on batch {i+1}. Waiting 20 s …")
+                time.sleep(20)
+
             else:
                 print(f"    ❌ Batch {i+1} attempt {attempt+1}: HTTP {r.status_code}")
                 print(f"       {resp_text}")
                 if attempt == 2:
-                    print(f"       Giving up on this batch.")
-                time.sleep(5 * (attempt + 1))
+                    print("       ❌ Giving up on this batch.")
+                else:
+                    time.sleep(5 * (attempt + 1))
 
-        time.sleep(1.5)  # Be gentle with rate limits
+        time.sleep(2)   # be polite between batches
+
 
 # ── GREYTHR HELPERS ───────────────────────────────────────────────────────────
 
@@ -379,28 +409,28 @@ def build_final(df_att: pd.DataFrame, df_emp: pd.DataFrame) -> pd.DataFrame:
         df = df[df["dayType"].astype(str).str.strip() != "OffDay"].copy()
         print(f"    🗑️  Removed {before - len(df):,} OffDay records")
 
+    # Filter Employee IDs starting with 'G'
+    before = len(df)
+    df = df[~df["employeeId"].astype(str).str.upper().str.startswith("G")].copy()
+    print(f"    🗑️  Removed {before - len(df):,} records with Employee ID starting with G")
+
     # Time & minute columns
-    df["Date"] = pd.to_datetime(df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
-    df["In Time"] = df["firstInTime"].apply(extract_time)
-    df["Out Time"] = df["lastOutTime"].apply(extract_time)
-    
-    # FIX: Replace empty time values with "00:00:00"
-    df["In Time"] = df["In Time"].apply(lambda x: "00:00:00" if not x or str(x).strip() == "" else x)
-    df["Out Time"] = df["Out Time"].apply(lambda x: "00:00:00" if not x or str(x).strip() == "" else x)
-    
-    df["Work Minutes"] = df["totalWorkHrs"].apply(hhmmss_to_minutes)
+    df["Date"]                   = pd.to_datetime(df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    df["In Time"]                = df["firstInTime"].apply(extract_time)
+    df["Out Time"]               = df["lastOutTime"].apply(extract_time)
+    df["Work Minutes"]           = df["totalWorkHrs"].apply(hhmmss_to_minutes)
     df["Actual Minutes (floor)"] = df["productionHours"].apply(hhmmss_to_minutes)
-    df["Shortfall(min)"] = df["shortFallHrs"].apply(hhmmss_to_minutes)
-    df["Break Minutes"] = df["breakHours"].apply(hhmmss_to_minutes)
+    df["Shortfall(min)"]         = df["shortFallHrs"].apply(hhmmss_to_minutes)
+    df["Break Minutes"]          = df["breakHours"].apply(hhmmss_to_minutes)
 
     # Status
     df["Status"] = df.apply(
         lambda r: build_status(r.get("session1Label"), r.get("session2Label")),
         axis=1
     )
-    
+
     # Join employees
-    wanted = ["employeeId", "name", "employeeNo", "leftorg"]
+    wanted        = ["employeeId", "name", "employeeNo", "leftorg"]
     emp_col_lower = {c.lower(): c for c in df_emp.columns}
 
     rename_map = {}
@@ -417,11 +447,11 @@ def build_final(df_att: pd.DataFrame, df_emp: pd.DataFrame) -> pd.DataFrame:
         .drop_duplicates(subset=["employeeId"])
     )
 
-    df["employeeId"] = df["employeeId"].astype(str).str.strip()
+    df["employeeId"]           = df["employeeId"].astype(str).str.strip()
     df_emp_clean["employeeId"] = df_emp_clean["employeeId"].astype(str).str.strip()
     df = df.merge(df_emp_clean, on="employeeId", how="left")
 
-    # Filter: active employees only
+    # Filter: active employees only (leftorg == FALSE)
     if "leftorg" in df.columns:
         before = len(df)
         df = df[df["leftorg"].astype(str).str.upper().str.strip() == "FALSE"].copy()
@@ -429,6 +459,7 @@ def build_final(df_att: pd.DataFrame, df_emp: pd.DataFrame) -> pd.DataFrame:
 
     df = df.rename(columns={"employeeNo": "Employee ID", "name": "Employee Name"})
 
+    # Final columns
     final_cols = [
         "Employee ID",
         "Employee Name",
@@ -443,46 +474,31 @@ def build_final(df_att: pd.DataFrame, df_emp: pd.DataFrame) -> pd.DataFrame:
         "leftorg",
     ]
     final_cols = [c for c in final_cols if c in df.columns]
-    df_final = df[final_cols].copy()
+    df_final   = df[final_cols].copy()
 
-    # Clean data types for Zoho
+    # Clean up types
     numeric_cols = ["Work Minutes", "Actual Minutes (floor)", "Shortfall(min)", "Break Minutes"]
     for col in numeric_cols:
         if col in df_final.columns:
-            df_final[col] = pd.to_numeric(df_final[col], errors='coerce').fillna(0).astype(int)
-    
-    # Ensure dates are valid
-    df_final["Date"] = pd.to_datetime(df_final["Date"], errors='coerce').dt.date
-    
-    # Remove any rows with invalid dates
-    df_final = df_final.dropna(subset=["Date"])
-    
-    # Convert Date back to string for Zoho
-    df_final["Date"] = df_final["Date"].astype(str)
-    
+            df_final[col] = pd.to_numeric(df_final[col], errors="coerce").fillna(0).astype(int)
+
     # Clean string columns
-    string_cols = ["Employee ID", "Employee Name", "Status", "leftorg"]
-    for col in string_cols:
+    str_cols = ["Employee ID", "Employee Name", "In Time", "Out Time", "Status", "leftorg"]
+    for col in str_cols:
         if col in df_final.columns:
             df_final[col] = df_final[col].astype(str).str.strip()
-            df_final[col] = df_final[col].replace("nan", "")
-            df_final[col] = df_final[col].replace("None", "")
-    
-    # Remove any rows with empty Employee ID
-    df_final = df_final[df_final["Employee ID"] != ""]
-    df_final = df_final[df_final["Employee ID"] != "nan"]
+            df_final[col] = df_final[col].replace({"nan": "", "None": ""})
+
+    # Remove rows with missing Employee ID or Date
+    df_final = df_final[df_final["Employee ID"].str.strip() != ""]
+    df_final = df_final.dropna(subset=["Date"])
+    df_final = df_final[df_final["Date"].astype(str).str.strip() != ""]
 
     df_final.sort_values(["Employee ID", "Date"], inplace=True)
     df_final.reset_index(drop=True, inplace=True)
 
-    # Preview the cleaned data (verify 00:00:00 is populated)
-    print(f"\n  📊 Sample after time fix:")
-    if len(df_final) > 0:
-        sample = df_final.iloc[0]
-        print(f"      In Time: '{sample['In Time']}'")
-        print(f"      Out Time: '{sample['Out Time']}'")
-
     return df_final
+
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 
@@ -495,7 +511,7 @@ def main():
     # 1. Refresh Zoho token
     zoho_token = get_zoho_access_token()
 
-    # 2. Check if Zoho table is empty → decide fetch range
+    # 2. Check Zoho table row count → decide fetch range
     print("\n[1/4] Checking Zoho table …")
     row_count = zoho_row_count(zoho_token)
     print(f"  ℹ️  Zoho table currently has {row_count:,} rows")
