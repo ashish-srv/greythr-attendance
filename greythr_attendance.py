@@ -195,6 +195,45 @@ def get_request(url: str, params: dict, retries: int = 3):
     return None
 
 
+def fetch_status_lov() -> pd.DataFrame:
+    """Fetch status LOV → returns DataFrame with id and name columns."""
+    print("  Fetching status LOV …")
+    try:
+        r = requests.post(
+            "https://api.greythr.com/hr/v2/lov",
+            headers=greythr_headers(),
+            json=["lov::status"],
+            timeout=30,
+        )
+        if r.status_code != 200:
+            print(f"  ⚠️  Status LOV failed: HTTP {r.status_code} — Employee Status will be blank")
+            return pd.DataFrame(columns=["id", "name"])
+
+        data = r.json()
+        rows = []
+        if isinstance(data, dict):
+            for value in data.values():
+                if isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, list):
+                            rows.append({"id": str(item[0]), "name": item[1] if len(item) > 1 else ""})
+                        elif isinstance(item, dict):
+                            rows.append({"id": str(item.get("id", "")), "name": item.get("name", "")})
+        elif isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict):
+                    rows.append({"id": str(item.get("id", "")), "name": item.get("name", "")})
+
+        df_lov = pd.DataFrame(rows) if rows else pd.DataFrame(columns=["id", "name"])
+        df_lov = df_lov[df_lov["id"] != ""].drop_duplicates(subset=["id"])
+        print(f"    ✅ {len(df_lov)} status entries | sample: {df_lov.head(3).to_dict('records')}")
+        return df_lov
+
+    except Exception as e:
+        print(f"  ⚠️  Status LOV error: {e} — Employee Status will be blank")
+        return pd.DataFrame(columns=["id", "name"])
+
+
 def hhmmss_to_minutes(val) -> int:
     if val is None:
         return 0
@@ -370,7 +409,7 @@ def fetch_attendance_range(start: date, end: date) -> list:
 
 # ── TRANSFORM & JOIN ──────────────────────────────────────────────────────────
 
-def build_final(df_att: pd.DataFrame, df_emp: pd.DataFrame) -> pd.DataFrame:
+def build_final(df_att: pd.DataFrame, df_emp: pd.DataFrame, df_lov: pd.DataFrame) -> pd.DataFrame:
     df = df_att.copy()
 
     # Filter OffDay
@@ -400,7 +439,7 @@ def build_final(df_att: pd.DataFrame, df_emp: pd.DataFrame) -> pd.DataFrame:
     )
 
     # Join employees
-    wanted        = ["employeeId", "name", "employeeNo", "leftorg"]
+    wanted        = ["employeeId", "name", "employeeNo", "leftorg", "status"]
     emp_col_lower = {c.lower(): c for c in df_emp.columns}
 
     rename_map = {}
@@ -429,10 +468,22 @@ def build_final(df_att: pd.DataFrame, df_emp: pd.DataFrame) -> pd.DataFrame:
 
     df = df.rename(columns={"employeeNo": "Employee ID", "name": "Employee Name"})
 
+    # Join status LOV → Employee Status
+    if "status" in df.columns and not df_lov.empty:
+        df["status"]   = df["status"].astype(str).str.strip()
+        df_lov["id"]   = df_lov["id"].astype(str).str.strip()
+        df = df.merge(df_lov.rename(columns={"name": "Employee Status"}),
+                      left_on="status", right_on="id", how="left")
+        df["Employee Status"] = df["Employee Status"].fillna("")
+        df = df.drop(columns=["id"], errors="ignore")
+    else:
+        df["Employee Status"] = ""
+
     # Final columns
     final_cols = [
         "Employee ID",
         "Employee Name",
+        "Employee Status",
         "Date",
         "In Time",
         "Out Time",
@@ -508,9 +559,13 @@ def main():
         print("⚠️  No attendance records fetched.")
         sys.exit(0)
 
-    # 5. Transform + join
-    print("\n[4/4] Transforming & joining …")
-    df_final = build_final(df_att, df_emp)
+    # 5. Fetch status LOV
+    print("\n[4/5] Fetching status LOV …")
+    df_lov = fetch_status_lov()
+
+    # 6. Transform + join
+    print("\n[5/5] Transforming & joining …")
+    df_final = build_final(df_att, df_emp, df_lov)
 
     print(f"\n  Rows      : {len(df_final):,}")
     print(f"  Employees : {df_final['Employee ID'].nunique()}")
