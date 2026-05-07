@@ -87,57 +87,77 @@ def zoho_row_count(access_token: str) -> int:
 
 def zoho_upsert(df: pd.DataFrame, access_token: str):
     """
-    Push DataFrame to Zoho Analytics using Import API with UPDATEADD strategy
-    (inserts new rows, updates existing rows matched on Employee ID + Date).
-    Sends in batches of 1000 rows.
+    Push DataFrame to Zoho Analytics with robust error handling.
     """
     url = (f"https://analyticsapi.zoho.in/restapi/v2/bulk/workspaces/"
            f"{ZOHO_WORKSPACE_ID}/views/{ZOHO_TABLE_ID}/data")
 
     headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
-
-    batch_size = 1000
-    total      = len(df)
-    batches    = (total + batch_size - 1) // batch_size
-
-    print(f"\n  📤 Pushing {total:,} rows to Zoho in {batches} batch(es) …")
-
+    
+    # DEBUG: Check first few rows
+    print("\n  🔍 DEBUG - First 3 rows being sent:")
+    print(df.head(3).to_string())
+    
+    # Try with smaller batch first
+    batch_size = 100  # Reduced from 1000 to debug
+    total = len(df)
+    
+    # Try just 1 row first for testing
+    debug_df = df.head(1)
+    csv_data = debug_df.to_csv(index=False)
+    print(f"\n  🔍 DEBUG - CSV preview:\n{csv_data[:500]}")
+    
+    # Test with just 1 row
+    files = {"DATA": ("data.csv", csv_data, "text/csv")}
+    data = {
+        "CONFIG": json.dumps({
+            "operation": "UPDATEADD",
+            "matchingColumns": ["Employee ID", "Date"],
+            "dateFormat": "yyyy-MM-dd",  # Changed from YYYY-MM-DD
+            "autoIdentify": "true",      # Add this
+        })
+    }
+    
+    print("\n  🔍 Test sending 1 row...")
+    r = requests.post(url, headers=headers, files=files, data=data, timeout=60)
+    print(f"  Response status: {r.status_code}")
+    print(f"  Response body: {r.text[:500]}")
+    
+    if r.status_code != 200:
+        print("  ❌ Test failed. Check column names and data types.")
+        return
+    
+    print("  ✅ Test successful! Now sending full data...")
+    
+    # If test passed, proceed with actual batches
+    batches = (total + batch_size - 1) // batch_size
     for i in range(batches):
-        batch     = df.iloc[i * batch_size : (i + 1) * batch_size]
-        csv_data  = batch.to_csv(index=False)
-
-        # Zoho Import API expects multipart form
-        files = {
-            "DATA": ("data.csv", csv_data, "text/csv"),
-        }
+        batch = df.iloc[i * batch_size : (i + 1) * batch_size]
+        csv_data = batch.to_csv(index=False)
+        
+        files = {"DATA": ("data.csv", csv_data, "text/csv")}
         data = {
             "CONFIG": json.dumps({
-                "operation":       "UPDATEADD",   # upsert
-                "matchingColumns": ["Employee ID", "Date"],  # unique key
-                "dateFormat":      "YYYY-MM-DD",
+                "operation": "UPDATEADD",
+                "matchingColumns": ["Employee ID", "Date"],
+                "dateFormat": "yyyy-MM-dd",
             })
         }
-
+        
         for attempt in range(3):
             r = requests.post(url, headers=headers, files=files, data=data, timeout=60)
             if r.status_code == 200:
                 resp = r.json()
-                imported = resp.get("data", {}).get("importSummary", {}).get("importedRowCount", "?")
-                updated  = resp.get("data", {}).get("importSummary", {}).get("updatedRowCount", "?")
-                print(f"    ✅ Batch {i+1}/{batches} — imported: {imported}, updated: {updated}")
+                print(f"    ✅ Batch {i+1}/{batches} succeeded")
                 break
-            elif r.status_code == 429:
-                print(f"    ⚠️  Rate limited on batch {i+1}. Waiting 15 s …")
-                time.sleep(15)
             else:
-                print(f"    ❌ Batch {i+1} failed: {r.status_code} {r.text[:300]}")
+                print(f"    ❌ Batch {i+1} failed (attempt {attempt+1}): {r.status_code}")
+                print(f"       Response: {r.text[:200]}")
                 if attempt == 2:
-                    print("    ❌ Max retries reached for this batch.")
-                else:
-                    time.sleep(5)
-
-        time.sleep(1)  # be polite between batches
-
+                    print(f"       Batch data preview: {csv_data[:200]}")
+                time.sleep(5)
+        
+        time.sleep(1)
 
 # ── GREYTHR HELPERS ───────────────────────────────────────────────────────────
 
@@ -365,13 +385,13 @@ def build_final(df_att: pd.DataFrame, df_emp: pd.DataFrame) -> pd.DataFrame:
         print(f"    🗑️  Removed {before - len(df):,} OffDay records")
 
     # Time & minute columns
-    df["Date"]                   = pd.to_datetime(df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
-    df["In Time"]                = df["firstInTime"].apply(extract_time)
-    df["Out Time"]               = df["lastOutTime"].apply(extract_time)
-    df["Work Minutes"]           = df["totalWorkHrs"].apply(hhmmss_to_minutes)
+    df["Date"] = pd.to_datetime(df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    df["In Time"] = df["firstInTime"].apply(extract_time)
+    df["Out Time"] = df["lastOutTime"].apply(extract_time)
+    df["Work Minutes"] = df["totalWorkHrs"].apply(hhmmss_to_minutes)
     df["Actual Minutes (floor)"] = df["productionHours"].apply(hhmmss_to_minutes)
-    df["Shortfall(min)"]         = df["shortFallHrs"].apply(hhmmss_to_minutes)
-    df["Break Minutes"]          = df["breakHours"].apply(hhmmss_to_minutes)
+    df["Shortfall(min)"] = df["shortFallHrs"].apply(hhmmss_to_minutes)
+    df["Break Minutes"] = df["breakHours"].apply(hhmmss_to_minutes)
 
     # Status
     df["Status"] = df.apply(
@@ -380,7 +400,7 @@ def build_final(df_att: pd.DataFrame, df_emp: pd.DataFrame) -> pd.DataFrame:
     )
 
     # Join employees
-    wanted        = ["employeeId", "name", "employeeNo", "leftorg"]
+    wanted = ["employeeId", "name", "employeeNo", "leftorg"]
     emp_col_lower = {c.lower(): c for c in df_emp.columns}
 
     rename_map = {}
@@ -397,7 +417,7 @@ def build_final(df_att: pd.DataFrame, df_emp: pd.DataFrame) -> pd.DataFrame:
         .drop_duplicates(subset=["employeeId"])
     )
 
-    df["employeeId"]           = df["employeeId"].astype(str).str.strip()
+    df["employeeId"] = df["employeeId"].astype(str).str.strip()
     df_emp_clean["employeeId"] = df_emp_clean["employeeId"].astype(str).str.strip()
     df = df.merge(df_emp_clean, on="employeeId", how="left")
 
@@ -423,14 +443,43 @@ def build_final(df_att: pd.DataFrame, df_emp: pd.DataFrame) -> pd.DataFrame:
         "leftorg",
     ]
     final_cols = [c for c in final_cols if c in df.columns]
-    df_final   = df[final_cols].copy()
+    df_final = df[final_cols].copy()
+
+    # CLEAN DATA TYPES FOR ZOHO
+    # Convert numeric columns to appropriate types
+    numeric_cols = ["Work Minutes", "Actual Minutes (floor)", "Shortfall(min)", "Break Minutes"]
+    for col in numeric_cols:
+        if col in df_final.columns:
+            df_final[col] = pd.to_numeric(df_final[col], errors='coerce').fillna(0).astype(int)
+    
+    # Ensure dates are valid
+    df_final["Date"] = pd.to_datetime(df_final["Date"], errors='coerce').dt.date
+    
+    # Remove any rows with invalid dates
+    df_final = df_final.dropna(subset=["Date"])
+    
+    # Convert Date back to string for Zoho
+    df_final["Date"] = df_final["Date"].astype(str)
+    
+    # Clean string columns
+    string_cols = ["Employee ID", "Employee Name", "In Time", "Out Time", "Status", "leftorg"]
+    for col in string_cols:
+        if col in df_final.columns:
+            df_final[col] = df_final[col].astype(str).str.strip()
+            df_final[col] = df_final[col].replace("nan", "")
+            df_final[col] = df_final[col].replace("None", "")
+    
+    # Remove any rows with empty Employee ID
+    df_final = df_final[df_final["Employee ID"] != ""]
+    df_final = df_final[df_final["Employee ID"] != "nan"]
 
     df_final.sort_values(["Employee ID", "Date"], inplace=True)
     df_final.reset_index(drop=True, inplace=True)
-    df_final = df_final.fillna("")
+
+    print(f"\n  📊 Final cleaned data shape: {df_final.shape}")
+    print(f"  📊 Sample row:\n{df_final.iloc[0].to_dict() if len(df_final) > 0 else 'Empty'}")
 
     return df_final
-
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 
