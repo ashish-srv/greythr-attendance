@@ -1,0 +1,30 @@
+name: greytHR Attendance Sync
+
+on:
+  schedule:
+    - cron: "0 */2 * * *"   # every 2 hours
+  workflow_dispatch:          # allows manual trigger from GitHub UI
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests pandas python-dateutil
+
+      - name: Run attendance sync
+        env:
+          GREYTHR_TOKEN:       ${{ secrets.GREYTHR_TOKEN }}
+          ZOHO_REFRESH_TOKEN:  ${{ secrets.ZOHO_REFRESH_TOKEN }}
+          ZOHO_CLIENT_ID:      ${{ secrets.ZOHO_CLIENT_ID }}
+          ZOHO_CLIENT_SECRET:  ${{ secrets.ZOHO_CLIENT_SECRET }}
+        run: python greythr_attendance.py
