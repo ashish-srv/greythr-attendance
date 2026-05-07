@@ -17,7 +17,6 @@ import json
 import time
 import os
 import sys
-import urllib.parse
 from datetime import datetime, date, timedelta
 from dateutil.relativedelta import relativedelta
 
@@ -28,13 +27,6 @@ DOMAIN         = "srv-media.greythr.com"
 ZOHO_REFRESH_TOKEN  = os.environ.get("ZOHO_REFRESH_TOKEN")
 ZOHO_CLIENT_ID      = os.environ.get("ZOHO_CLIENT_ID")
 ZOHO_CLIENT_SECRET  = os.environ.get("ZOHO_CLIENT_SECRET")
-
-ZOHO_EMAIL          = "ashish.kate@srvmedia.com"
-ZOHO_WORKSPACE      = "Account Dashboard"
-ZOHO_TABLE          = "greytHR Attendance"
-
-# v1 API base — India data center
-ZOHO_API_BASE = "https://analyticsapi.zoho.in/api"
 
 HISTORY_START = date(2025, 1, 1)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -69,42 +61,30 @@ def get_zoho_access_token() -> str:
 
 # ── ZOHO DATA ─────────────────────────────────────────────────────────────────
 
-def zoho_table_url() -> str:
-    """Build the v1 API URL for the target table."""
-    email     = urllib.parse.quote(ZOHO_EMAIL, safe="")
-    workspace = urllib.parse.quote(ZOHO_WORKSPACE, safe="")
-    table     = urllib.parse.quote(ZOHO_TABLE, safe="")
-    return f"{ZOHO_API_BASE}/{email}/{workspace}/{table}"
-
+ZOHO_WORKSPACE_ID = "445405000000352027"
+ZOHO_VIEW_ID      = "445405000014385591"
+ZOHO_V2_BASE      = "https://analyticsapi.zoho.in/restapi/v2"
 
 def zoho_row_count(access_token: str) -> int:
     """
-    Return number of rows currently in the Zoho table.
-    Uses v1 EXPORT action with pageSize=1 to get totalCount.
+    Check if Zoho table has any rows using v2 API.
     Returns 0 on any failure (treated as first run).
     """
-    url = zoho_table_url()
-    params = {
-        "ZOHO_ACTION":        "EXPORT",
-        "ZOHO_OUTPUT_FORMAT": "JSON",
-        "ZOHO_ERROR_FORMAT":  "JSON",
-        "ZOHO_API_VERSION":   "1.0",
-        "ZOHO_RECORD_COUNT":  "1",         # fetch only 1 row to check existence
-    }
+    url     = f"{ZOHO_V2_BASE}/workspaces/{ZOHO_WORKSPACE_ID}/views/{ZOHO_VIEW_ID}/data"
     headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+    params  = {"pageSize": 1}
     try:
-        r = requests.post(url, headers=headers, params=params, timeout=30)
+        r = requests.get(url, headers=headers, params=params, timeout=30)
+        print(f"  ℹ️  Row count check: HTTP {r.status_code}")
+        print(f"  ℹ️  Response: {r.text[:300]}")
         if r.status_code == 200:
-            data = r.json()
-            # v1 response: {"response": {"result": {"totalCount": "N", ...}}}
-            total = (
-                data.get("response", {})
-                    .get("result", {})
-                    .get("totalCount", "0")
+            data  = r.json()
+            count = (
+                data.get("data", {}).get("totalCount")
+                or data.get("totalCount")
+                or 0
             )
-            return int(total)
-        else:
-            print(f"  ⚠️  Row count check returned {r.status_code}: {r.text[:200]}")
+            return int(count)
     except Exception as e:
         print(f"  ⚠️  Could not check row count: {e}")
     return 0
@@ -112,76 +92,41 @@ def zoho_row_count(access_token: str) -> int:
 
 def zoho_upsert(df: pd.DataFrame, access_token: str):
     """
-    Push DataFrame to Zoho Analytics using v1 Import API.
-    ZOHO_IMPORT_TYPE=UPDATEADD → insert new rows, update existing
-    matched on Employee ID + Date (set as unique columns in Zoho table).
-    Sends in batches of 500 rows.
+    Push DataFrame to Zoho Analytics using v2 Bulk Import API.
+    Sends only the first batch of 5 rows for testing.
+    Stops immediately on any error — no retries.
     """
-    url     = zoho_table_url()
+    url     = f"{ZOHO_V2_BASE}/bulk/workspaces/{ZOHO_WORKSPACE_ID}/views/{ZOHO_VIEW_ID}/data"
     headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
 
-    batch_size = 500
-    total      = len(df)
-    batches    = (total + batch_size - 1) // batch_size
+    # TEST MODE: push only first 5 rows
+    test_batch = df.head(5)
+    csv_data   = test_batch.to_csv(index=False).encode("utf-8")
 
-    print(f"\n  📤 Pushing {total:,} rows to Zoho in {batches} batch(es) …")
+    print(f"\n  📤 TEST: Pushing first 5 rows to Zoho …")
+    print(f"  🔍 Columns: {list(test_batch.columns)}")
+    print(f"  🔍 Sample:\n{test_batch.to_string(index=False)}")
 
-    for i in range(batches):
-        batch    = df.iloc[i * batch_size : (i + 1) * batch_size]
-        csv_data = batch.to_csv(index=False).encode("utf-8")
+    config = json.dumps({
+        "operation":       "UPDATEADD",
+        "matchingColumns": ["Employee ID", "Date"],
+        "dateFormat":      "yyyy-MM-dd",
+        "autoIdentify":    True,
+    })
 
-        # v1 API params go as query string, file goes as multipart
-        params = {
-            "ZOHO_ACTION":        "IMPORT",
-            "ZOHO_OUTPUT_FORMAT": "JSON",
-            "ZOHO_ERROR_FORMAT":  "JSON",
-            "ZOHO_API_VERSION":   "1.0",
-            "ZOHO_IMPORT_TYPE":   "UPDATEADD",   # upsert
-            "ZOHO_AUTO_IDENTIFY": "TRUE",         # auto-detect column types
-            "ZOHO_ON_IMPORT_ERROR": "ABORT",
-            "ZOHO_MATCHING_COLUMNS": "Employee ID,Date",  # unique key for upsert
-        }
+    files     = {"DATA": ("data.csv", csv_data, "text/csv")}
+    form_data = {"CONFIG": config}
 
-        files = {
-            "ZOHO_FILE": ("data.csv", csv_data, "text/csv"),
-        }
+    r = requests.post(url, headers=headers, files=files, data=form_data, timeout=120)
 
-        for attempt in range(3):
-            r = requests.post(
-                url,
-                headers=headers,
-                params=params,
-                files=files,
-                timeout=120,
-            )
-            resp_text = r.text[:1000]
+    print(f"\n  HTTP Status : {r.status_code}")
+    print(f"  Response    : {r.text[:2000]}")
 
-            if r.status_code == 200:
-                try:
-                    resp       = r.json()
-                    result     = resp.get("response", {}).get("result", {})
-                    imported   = result.get("importSummary", {}).get("addedRows", "?")
-                    updated    = result.get("importSummary", {}).get("updatedRows", "?")
-                    skipped    = result.get("importSummary", {}).get("skippedRows", "?")
-                    print(f"    ✅ Batch {i+1}/{batches} — "
-                          f"added: {imported}, updated: {updated}, skipped: {skipped}")
-                except Exception:
-                    print(f"    ✅ Batch {i+1}/{batches} succeeded (raw: {resp_text})")
-                break
-
-            elif r.status_code == 429:
-                print(f"    ⚠️  Rate limited on batch {i+1}. Waiting 20 s …")
-                time.sleep(20)
-
-            else:
-                print(f"    ❌ Batch {i+1} attempt {attempt+1}: HTTP {r.status_code}")
-                print(f"       {resp_text}")
-                if attempt == 2:
-                    print("       ❌ Giving up on this batch.")
-                else:
-                    time.sleep(5 * (attempt + 1))
-
-        time.sleep(2)   # be polite between batches
+    if r.status_code == 200:
+        print("\n  ✅ Test batch succeeded! Ready to push all batches.")
+    else:
+        print("\n  ❌ Test batch failed. Fix the error above before pushing all data.")
+        sys.exit(1)
 
 
 # ── GREYTHR HELPERS ───────────────────────────────────────────────────────────
