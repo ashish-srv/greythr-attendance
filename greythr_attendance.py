@@ -71,7 +71,7 @@ def zoho_row_count(access_token: str) -> int:
     Returns 0 on any failure (treated as first run).
     """
     url     = f"{ZOHO_V2_BASE}/workspaces/{ZOHO_WORKSPACE_ID}/views/{ZOHO_VIEW_ID}/data"
-    headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+    headers = {"Authorization": f"Zoho-oauthtoken {access_token}", "ZANALYTICS-ORGID": os.environ.get("ZOHO_ORG_ID", "")}
     params  = {"pageSize": 1}
     try:
         r = requests.get(url, headers=headers, params=params, timeout=30)
@@ -97,7 +97,7 @@ def zoho_upsert(df: pd.DataFrame, access_token: str):
     Stops immediately on any error — no retries.
     """
     url     = f"{ZOHO_V2_BASE}/bulk/workspaces/{ZOHO_WORKSPACE_ID}/views/{ZOHO_VIEW_ID}/data"
-    headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+    headers = {"Authorization": f"Zoho-oauthtoken {access_token}", "ZANALYTICS-ORGID": os.environ.get("ZOHO_ORG_ID", "")}
 
     # TEST MODE: push only first 5 rows
     test_batch = df.head(5)
