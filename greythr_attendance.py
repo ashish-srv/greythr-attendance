@@ -393,12 +393,23 @@ def build_final(df_att: pd.DataFrame, df_emp: pd.DataFrame) -> pd.DataFrame:
     df["Shortfall(min)"] = df["shortFallHrs"].apply(hhmmss_to_minutes)
     df["Break Minutes"] = df["breakHours"].apply(hhmmss_to_minutes)
 
+    # FIX: Replace empty time strings with NULL/None for Zoho
+    df["In Time"] = df["In Time"].replace("", None)
+    df["Out Time"] = df["Out Time"].replace("", None)
+    
+    # Also replace any whitespace-only strings
+    df["In Time"] = df["In Time"].apply(lambda x: None if pd.isna(x) or str(x).strip() == "" else x)
+    df["Out Time"] = df["Out Time"].apply(lambda x: None if pd.isna(x) or str(x).strip() == "" else x)
+
     # Status
     df["Status"] = df.apply(
         lambda r: build_status(r.get("session1Label"), r.get("session2Label")),
         axis=1
     )
-
+    
+    # Clean Status
+    df["Status"] = df["Status"].replace("", "Present")  # Default status if empty
+    
     # Join employees
     wanted = ["employeeId", "name", "employeeNo", "leftorg"]
     emp_col_lower = {c.lower(): c for c in df_emp.columns}
@@ -445,8 +456,7 @@ def build_final(df_att: pd.DataFrame, df_emp: pd.DataFrame) -> pd.DataFrame:
     final_cols = [c for c in final_cols if c in df.columns]
     df_final = df[final_cols].copy()
 
-    # CLEAN DATA TYPES FOR ZOHO
-    # Convert numeric columns to appropriate types
+    # Clean data types for Zoho
     numeric_cols = ["Work Minutes", "Actual Minutes (floor)", "Shortfall(min)", "Break Minutes"]
     for col in numeric_cols:
         if col in df_final.columns:
@@ -462,12 +472,18 @@ def build_final(df_att: pd.DataFrame, df_emp: pd.DataFrame) -> pd.DataFrame:
     df_final["Date"] = df_final["Date"].astype(str)
     
     # Clean string columns
-    string_cols = ["Employee ID", "Employee Name", "In Time", "Out Time", "Status", "leftorg"]
+    string_cols = ["Employee ID", "Employee Name", "Status", "leftorg"]
     for col in string_cols:
         if col in df_final.columns:
             df_final[col] = df_final[col].astype(str).str.strip()
             df_final[col] = df_final[col].replace("nan", "")
             df_final[col] = df_final[col].replace("None", "")
+    
+    # Clean boolean for leftorg
+    if "leftorg" in df_final.columns:
+        df_final["leftorg"] = df_final["leftorg"].astype(str).str.upper()
+        df_final["leftorg"] = df_final["leftorg"].replace("FALSE", "False")
+        df_final["leftorg"] = df_final["leftorg"].replace("TRUE", "True")
     
     # Remove any rows with empty Employee ID
     df_final = df_final[df_final["Employee ID"] != ""]
@@ -476,8 +492,12 @@ def build_final(df_att: pd.DataFrame, df_emp: pd.DataFrame) -> pd.DataFrame:
     df_final.sort_values(["Employee ID", "Date"], inplace=True)
     df_final.reset_index(drop=True, inplace=True)
 
+    # Preview the cleaned data
     print(f"\n  📊 Final cleaned data shape: {df_final.shape}")
-    print(f"  📊 Sample row:\n{df_final.iloc[0].to_dict() if len(df_final) > 0 else 'Empty'}")
+    print(f"  📊 Sample row after cleaning:")
+    sample_row = df_final.iloc[0].to_dict() if len(df_final) > 0 else {}
+    for k, v in sample_row.items():
+        print(f"      {k}: {v} (type: {type(v).__name__})")
 
     return df_final
 
