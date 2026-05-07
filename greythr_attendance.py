@@ -92,56 +92,66 @@ def zoho_row_count(access_token: str) -> int:
 
 def zoho_upsert(df: pd.DataFrame, access_token: str):
     """
-    Push DataFrame to Zoho Analytics using v2 Import API.
-    - URL: /restapi/v2/workspaces/{id}/views/{id}/data  (no /bulk/)
-    - CONFIG passed as URL-encoded query param
-    - File sent as multipart with key FILE
-    Sends only the first 5 rows for testing. Stops immediately on error.
+    Push full DataFrame to Zoho Analytics using v2 Import API.
+    - Batches of 5000 rows each
+    - CONFIG as form field (data=), FILE as multipart
+    - Stops immediately on any error
     """
-    import urllib.parse
+    import io
 
     base_url = f"{ZOHO_V2_BASE}/workspaces/{ZOHO_WORKSPACE_ID}/views/{ZOHO_VIEW_ID}/data"
     headers  = {
-        "Authorization":  f"Zoho-oauthtoken {access_token}",
+        "Authorization":    f"Zoho-oauthtoken {access_token}",
         "ZANALYTICS-ORGID": os.environ.get("ZOHO_ORG_ID", ""),
     }
-
-    # TEST MODE: push only first 5 rows
-    test_batch = df.head(5)
-    csv_data   = test_batch.to_csv(index=False).encode("utf-8")
-
-    print(f"\n  📤 TEST: Pushing first 5 rows to Zoho …")
-    print(f"  🔍 Columns: {list(test_batch.columns)}")
-    print(f"  🔍 Sample:\n{test_batch.to_string(index=False)}")
 
     config = {
         "importType":      "updateadd",
         "fileType":        "csv",
-        "autoIdentify":    "true",                      # string not boolean
-        "dateFormat":      "yyyy-MM-dd",                # our date format
-        "matchingColumns": ["Employee ID", "Date"],     # JSON array
+        "autoIdentify":    "true",
+        "dateFormat":      "yyyy-MM-dd",
+        "matchingColumns": ["Employee ID", "Date"],
     }
     config_str = json.dumps(config)
 
-    print(f"\n  🔍 CONFIG being sent: {config_str}")
+    batch_size = 5000
+    total      = len(df)
+    batches    = (total + batch_size - 1) // batch_size
 
-    # CONFIG as form field (data=), FILE as multipart — same request
-    r = requests.post(
-        base_url,
-        headers=headers,
-        data={"CONFIG": config_str},
-        files={"FILE": ("data.csv", csv_data, "text/csv")},
-        timeout=120,
-    )
+    print(f"\n  📤 Pushing {total:,} rows in {batches} batch(es) of {batch_size} …")
 
-    print(f"\n  HTTP Status : {r.status_code}")
-    print(f"  Response    : {r.text[:2000]}")
+    for i in range(batches):
+        batch = df.iloc[i * batch_size : (i + 1) * batch_size]
 
-    if r.status_code == 200:
-        print("\n  ✅ Test batch succeeded! Ready to push all batches.")
-    else:
-        print("\n  ❌ Test batch failed. Fix the error above before pushing all data.")
-        sys.exit(1)
+        buf = io.BytesIO()
+        batch.to_csv(buf, index=False, encoding="utf-8-sig")
+        csv_bytes = buf.getvalue()
+
+        # always updateadd — guarantees no duplicates on every run
+
+        r = requests.post(
+            base_url,
+            headers=headers,
+            data={"CONFIG": config_str},
+            files={"FILE": ("data.csv", csv_bytes, "text/csv")},
+            timeout=120,
+        )
+
+        if r.status_code == 200:
+            try:
+                resp    = r.json()
+                summary = resp.get("data", {}).get("importSummary", {})
+                print(f"    ✅ Batch {i+1}/{batches} — "
+                      f"rows: {summary.get('successRowCount','?')} | "
+                      f"op: {summary.get('importOperation','?')}")
+            except Exception:
+                print(f"    ✅ Batch {i+1}/{batches} succeeded")
+        else:
+            print(f"    ❌ Batch {i+1}/{batches} failed: HTTP {r.status_code}")
+            print(f"       {r.text[:500]}")
+            sys.exit(1)
+
+        time.sleep(1)
 
 
 # ── GREYTHR HELPERS ───────────────────────────────────────────────────────────
