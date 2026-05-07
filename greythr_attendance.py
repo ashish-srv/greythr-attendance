@@ -92,12 +92,19 @@ def zoho_row_count(access_token: str) -> int:
 
 def zoho_upsert(df: pd.DataFrame, access_token: str):
     """
-    Push DataFrame to Zoho Analytics using v2 Bulk Import API.
-    Sends only the first batch of 5 rows for testing.
-    Stops immediately on any error — no retries.
+    Push DataFrame to Zoho Analytics using v2 Import API.
+    - URL: /restapi/v2/workspaces/{id}/views/{id}/data  (no /bulk/)
+    - CONFIG passed as URL-encoded query param
+    - File sent as multipart with key FILE
+    Sends only the first 5 rows for testing. Stops immediately on error.
     """
-    url     = f"{ZOHO_V2_BASE}/bulk/workspaces/{ZOHO_WORKSPACE_ID}/views/{ZOHO_VIEW_ID}/data"
-    headers = {"Authorization": f"Zoho-oauthtoken {access_token}", "ZANALYTICS-ORGID": os.environ.get("ZOHO_ORG_ID", "")}
+    import urllib.parse
+
+    base_url = f"{ZOHO_V2_BASE}/workspaces/{ZOHO_WORKSPACE_ID}/views/{ZOHO_VIEW_ID}/data"
+    headers  = {
+        "Authorization":  f"Zoho-oauthtoken {access_token}",
+        "ZANALYTICS-ORGID": os.environ.get("ZOHO_ORG_ID", ""),
+    }
 
     # TEST MODE: push only first 5 rows
     test_batch = df.head(5)
@@ -108,16 +115,17 @@ def zoho_upsert(df: pd.DataFrame, access_token: str):
     print(f"  🔍 Sample:\n{test_batch.to_string(index=False)}")
 
     config = json.dumps({
-        "operation":       "UPDATEADD",
-        "matchingColumns": ["Employee ID", "Date"],
-        "dateFormat":      "yyyy-MM-dd",
-        "autoIdentify":    True,
+        "importType":      "updateadd",
+        "fileType":        "csv",
+        "autoIdentify":    "true",
+        "matchingColumns": "Employee ID,Date",
     })
 
-    files     = {"DATA": ("data.csv", csv_data, "text/csv")}
-    form_data = {"CONFIG": config}
+    # CONFIG goes as URL query param (URL-encoded), FILE as multipart
+    url   = f"{base_url}?CONFIG={urllib.parse.quote(config)}"
+    files = {"FILE": ("data.csv", csv_data, "text/csv")}
 
-    r = requests.post(url, headers=headers, files=files, data=form_data, timeout=120)
+    r = requests.post(url, headers=headers, files=files, timeout=120)
 
     print(f"\n  HTTP Status : {r.status_code}")
     print(f"  Response    : {r.text[:2000]}")
