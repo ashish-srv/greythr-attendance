@@ -1,0 +1,32 @@
+name: greytHR Swipe & Leave Sync
+
+on:
+  schedule:
+    - cron: "0 * * * *"    # every hour
+  workflow_dispatch:         # manual trigger from GitHub UI
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests pandas python-dateutil
+
+      - name: Run swipe & leave sync
+        env:
+          GREYTHR_TOKEN:       ${{ secrets.GREYTHR_TOKEN }}
+          ZOHO_REFRESH_TOKEN:  ${{ secrets.ZOHO_REFRESH_TOKEN }}
+          ZOHO_CLIENT_ID:      ${{ secrets.ZOHO_CLIENT_ID }}
+          ZOHO_CLIENT_SECRET:  ${{ secrets.ZOHO_CLIENT_SECRET }}
+          ZOHO_ORG_ID:         ${{ secrets.ZOHO_ORG_ID }}
+          ZOHO_SWIPE_VIEW_ID:  ${{ secrets.ZOHO_SWIPE_VIEW_ID }}
+        run: python swipe_leave_fetch.py
