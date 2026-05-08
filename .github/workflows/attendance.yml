@@ -2,7 +2,7 @@ name: greytHR Attendance Sync
 
 on:
   schedule:
-    - cron: "0 */2 * * *"   # every 2 hours
+    - cron: "0 19 * * *"   # every 2 hours
   workflow_dispatch:          # allows manual trigger from GitHub UI
 
 jobs:
