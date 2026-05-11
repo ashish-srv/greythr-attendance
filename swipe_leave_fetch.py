@@ -75,15 +75,23 @@ def get_zoho_access_token() -> str:
 
 def zoho_delete_all(access_token: str):
     """Delete all existing rows from Zoho table before pushing fresh data."""
+    import urllib.parse
     url     = f"{ZOHO_V2_BASE}/workspaces/{ZOHO_WORKSPACE_ID}/views/{ZOHO_VIEW_ID}/rows"
     headers = {
         "Authorization":    f"Zoho-oauthtoken {access_token}",
         "ZANALYTICS-ORGID": ZOHO_ORG_ID,
     }
+    # Zoho requires criteria to delete — use IS NOT NULL to match all rows
+    config     = json.dumps({"criteria": '"attendanceDate" IS NOT NULL'})
+    params     = {"CONFIG": config}
     print("\n  🗑️  Deleting all existing rows from Zoho table …")
-    r = requests.delete(url, headers=headers, timeout=60)
+    r = requests.delete(url, headers=headers, params=params, timeout=60)
     if r.status_code in (200, 204):
-        print("  ✅ All rows deleted")
+        try:
+            deleted = r.json().get("data", {}).get("deletedRows", "?")
+            print(f"  ✅ Deleted {deleted} rows")
+        except Exception:
+            print("  ✅ Delete successful")
     else:
         print(f"  ⚠️  Delete returned HTTP {r.status_code}: {r.text[:300]}")
         print("  ⚠️  Continuing with push anyway …")
