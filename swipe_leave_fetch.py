@@ -73,8 +73,24 @@ def get_zoho_access_token() -> str:
     return token
 
 
-def zoho_upsert(df: pd.DataFrame, access_token: str):
-    """Push DataFrame to Zoho using UPDATEADD on Employee ID + attendanceDate."""
+def zoho_delete_all(access_token: str):
+    """Delete all existing rows from Zoho table before pushing fresh data."""
+    url     = f"{ZOHO_V2_BASE}/workspaces/{ZOHO_WORKSPACE_ID}/views/{ZOHO_VIEW_ID}/rows"
+    headers = {
+        "Authorization":    f"Zoho-oauthtoken {access_token}",
+        "ZANALYTICS-ORGID": ZOHO_ORG_ID,
+    }
+    print("\n  🗑️  Deleting all existing rows from Zoho table …")
+    r = requests.delete(url, headers=headers, timeout=60)
+    if r.status_code in (200, 204):
+        print("  ✅ All rows deleted")
+    else:
+        print(f"  ⚠️  Delete returned HTTP {r.status_code}: {r.text[:300]}")
+        print("  ⚠️  Continuing with push anyway …")
+
+
+def zoho_push(df: pd.DataFrame, access_token: str):
+    """Push DataFrame to Zoho using APPEND (fresh insert after delete)."""
     import io
     url     = f"{ZOHO_V2_BASE}/workspaces/{ZOHO_WORKSPACE_ID}/views/{ZOHO_VIEW_ID}/data"
     headers = {
@@ -82,11 +98,10 @@ def zoho_upsert(df: pd.DataFrame, access_token: str):
         "ZANALYTICS-ORGID": ZOHO_ORG_ID,
     }
     config = {
-        "importType":      "updateadd",
-        "fileType":        "csv",
-        "autoIdentify":    "true",
-        "dateFormat":      "yyyy-MM-dd",
-        "matchingColumns": ["Employee ID", "attendanceDate"],
+        "importType":   "append",
+        "fileType":     "csv",
+        "autoIdentify": "true",
+        "dateFormat":   "yyyy-MM-dd",
     }
     config_str = json.dumps(config)
 
@@ -537,7 +552,8 @@ def main():
     print(df_final.head(3).to_string(index=False))
 
     # 7. Push to Zoho
-    zoho_upsert(df_final, zoho_token)
+    zoho_delete_all(zoho_token)
+    zoho_push(df_final, zoho_token)
 
     print("\n✅ All done!")
 
