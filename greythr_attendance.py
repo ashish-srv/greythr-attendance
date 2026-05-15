@@ -418,11 +418,6 @@ def build_final(df_att: pd.DataFrame, df_emp: pd.DataFrame, df_lov: pd.DataFrame
         df = df[df["dayType"].astype(str).str.strip() != "OffDay"].copy()
         print(f"    🗑️  Removed {before - len(df):,} OffDay records")
 
-    # Filter Employee IDs starting with 'G'
-    before = len(df)
-    df = df[~df["employeeId"].astype(str).str.upper().str.startswith("G")].copy()
-    print(f"    🗑️  Removed {before - len(df):,} records with Employee ID starting with G")
-
     # Time & minute columns
     df["Date"]                   = pd.to_datetime(df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
     df["In Time"]                = df["firstInTime"].apply(extract_time)
@@ -438,8 +433,8 @@ def build_final(df_att: pd.DataFrame, df_emp: pd.DataFrame, df_lov: pd.DataFrame
         axis=1
     )
 
-    # Join employees
-    wanted        = ["employeeId", "name", "employeeNo", "leftorg", "status"]
+    # Join employees — include leavingDate
+    wanted        = ["employeeId", "name", "employeeNo", "leftorg", "status", "leavingDate"]  # Fix 2
     emp_col_lower = {c.lower(): c for c in df_emp.columns}
 
     rename_map = {}
@@ -460,13 +455,37 @@ def build_final(df_att: pd.DataFrame, df_emp: pd.DataFrame, df_lov: pd.DataFrame
     df_emp_clean["employeeId"] = df_emp_clean["employeeId"].astype(str).str.strip()
     df = df.merge(df_emp_clean, on="employeeId", how="left")
 
-    # Filter: active employees only (leftorg == FALSE)
+    df = df.rename(columns={"employeeNo": "Employee ID", "name": "Employee Name"})
+
+    # Fix 1 — G filter now runs on correct Employee ID column
+    before = len(df)
+    df = df[~df["Employee ID"].astype(str).str.upper().str.startswith("G")].copy()
+    print(f"    🗑️  Removed {before - len(df):,} records with Employee ID starting with G")
+
+    # Fix 3 — Keep ex-employee attendance only up to leaving date
     if "leftorg" in df.columns:
         before = len(df)
-        df = df[df["leftorg"].astype(str).str.upper().str.strip() == "FALSE"].copy()
-        print(f"    🗑️  Removed {before - len(df):,} records where leftorg ≠ FALSE")
 
-    df = df.rename(columns={"employeeNo": "Employee ID", "name": "Employee Name"})
+        if "leavingDate" in df.columns:
+            df["leavingDate"] = pd.to_datetime(df["leavingDate"], errors="coerce")
+            df["Date_dt"]     = pd.to_datetime(df["Date"], errors="coerce")
+
+            df = df[
+                (df["leftorg"].astype(str).str.upper().str.strip() == "FALSE")
+                |
+                (
+                    (df["leftorg"].astype(str).str.upper().str.strip() == "TRUE")
+                    & (df["Date_dt"].notna())
+                    & (df["leavingDate"].notna())
+                    & (df["Date_dt"] <= df["leavingDate"])
+                )
+            ].copy()
+
+            df = df.drop(columns=["Date_dt"], errors="ignore")
+        else:
+            print("    ⚠️  leavingDate not found — keeping all employee records")
+
+        print(f"    🗑️  Removed {before - len(df):,} records after leaving date or invalid")
 
     # Join status LOV → Employee Status
     if "status" in df.columns and not df_lov.empty:
@@ -519,7 +538,6 @@ def build_final(df_att: pd.DataFrame, df_emp: pd.DataFrame, df_lov: pd.DataFrame
     df_final.reset_index(drop=True, inplace=True)
 
     return df_final
-
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 
